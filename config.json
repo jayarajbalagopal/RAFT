@@ -1,6 +1,9 @@
 {
   "log_level" : "DEBUG",
   "log_file" : "raft_server.log",
+  "timeout_low" : 150,
+  "timeout_high" : 300,
+  "heartbeat_delay": 50,
   "servers" : [
     "127.0.0.1:5000",
     "127.0.0.1:5001",
