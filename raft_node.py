@@ -25,10 +25,10 @@ class RaftNode:
 
 		# Messaging context
 		self.context = zmq.Context()
-		self.socket = self.context.socket(zmq.REP)
-		self.socket.bind("tcp://{}".format(self.node_address))
+		self.listen_socket = self.context.socket(zmq.REP)
+		self.listen_socket.bind("tcp://{}".format(self.node_address))
 		self.poller = zmq.Poller()
-		self.poller.register(self.socket, zmq.POLLIN)
+		self.poller.register(self.listen_socket, zmq.POLLIN)
 
 		# Raft variables
 		self.state = "FOLLOWER"
@@ -68,33 +68,34 @@ class RaftNode:
 		while True:
 			# Wait for a message
 			socks = dict(self.poller.poll())
-			if self.socket in socks and socks[self.socket] == zmq.POLLIN:
-				message = self.socket.recv_pyobj()
+			if self.listen_socket in socks and socks[self.listen_socket] == zmq.POLLIN:
+				message = self.listen_socket.recv_pyobj()
 
 				# Recived a append entry message
 				if isinstance(message, AppendEntryArgs):
 					logger.info("Node {}, received append entry".format(self.node_id))
 					reply = self.append_entries(message)
-					self.socket.send_pyobj(reply)
+					self.listen_socket.send_pyobj(reply)
 
 				# Received a vote request
 				if isinstance(message, RequestVoteArgs):
 					peer_id = message.candidate_id
 					logger.info("Node {}, received vote request from {}".format(self.node_id, peer_id))
 					reply = self.vote(message)
-					self.socket.send_pyobj(reply)
+					self.listen_socket.send_pyobj(reply)
 
 	def async_timeout_thread(self):
 		# Only followers will need to wait for heartbeat, they check for timeout and start election
 		while self.state != "LEADER":
-			time.sleep(2)
 			cur_time = time.time()
 			delta = self.timeout - cur_time
 			if delta <= 0:
-				# Timeout, Set a new timeout and start the election. Transition to follower before starting election.
-				self.set_randomized_timeout()
+				# Transition to follower before starting election.
 				self.state = "FOLLOWER"
 				self.reset_election_params()
+
+				# Timeout, Set a new timeout and start the election.
+				self.set_randomized_timeout()
 				self.start_election()
 
 				# Wait for the remaining time
@@ -106,56 +107,6 @@ class RaftNode:
 				# Wait for the remaining time
 				time.sleep(delta)
 		self.start_heartbeat()
-
-	def start_election(self):
-		logger.info("Node {}, staring election".format(self.node_id))
-
-		# Transition to candidate state
-		self.state = "CANDIDATE"
-		logger.info("Node {}, switched to CANDIDATE".format(self.node_id))
-
-		# Increment term
-		self.term += 1
-
-		# Vote for himself
-		self.votes_received = 1
-		self.voted_for = self.node_id
-		
-		# Request for votes from peers
-		sending_threads = []
-		for node_id in self.peers:
-			vote_request = RequestVoteArgs(self.term, self.node_id, self.last_log_index, self.last_log_term)
-			self.async_send_message(node_id, vote_request)
-
-	def async_send_message(self, target_node_id, message):
-		socket = self.context.socket(zmq.REQ)
-		peer_address = self.node_addresses[target_node_id]
-		socket.connect("tcp://{}".format(peer_address))
-		try:
-			socket.send_pyobj(message, zmq.NOBLOCK)
-		except:
-			logger.error("Node {}, failed to send message".format(self.node_id))
-		else:
-			poller = zmq.Poller()
-			poller.register(socket, zmq.POLLIN)
-			events = dict(poller.poll(50))
-			if socket in events and events[socket] == zmq.POLLIN:
-				reply = socket.recv_pyobj(zmq.NOBLOCK)
-				self.handle_reponse(reply)
-			else:
-				logger.error("Node {}, failed to receive message".format(self.node_id))
-		# sending_thread = threading.Thread(target=self.send_message, args=(target_node_id, message))
-		# sending_thread.start()
-	
-	def send_message(self, target_node_id, message):
-		# Send message and wait for reply
-		socket = self.context.socket(zmq.REQ)
-		peer_address = self.node_addresses[target_node_id]
-		socket.connect("tcp://{}".format(peer_address))
-		socket.send_pyobj(message)
-		reply = socket.recv_pyobj()
-		self.handle_reponse(reply)
-		socket.close()
 
 	def handle_reponse(self, message):
 		# Response to vote request
@@ -179,6 +130,61 @@ class RaftNode:
 				if self.state == "CANDIDATE":
 					self.state = "FOLLOWER"
 
+	def send_message(self, target_node_id, message, timeout): 
+		# Send message and wait for reply
+		socket = self.context.socket(zmq.REQ)
+		socket.setsockopt(zmq.LINGER, 0)
+		peer_address = self.node_addresses[target_node_id]
+		socket.connect("tcp://{}".format(peer_address))
+
+		cur_time = time.time()
+		delta = timeout - cur_time
+		if delta > 0:
+			try:
+				socket.send_pyobj(message)
+			except:
+				logger.error("Node {}, failed to send message".format(self.node_id))
+			else:
+				cur_time = time.time()
+				delta = timeout - cur_time
+				if delta > 0:
+					socket.setsockopt(zmq.RCVTIMEO, int(delta * 1000))
+					try:
+						reply = socket.recv_pyobj()
+						self.handle_reponse(reply)
+					except:
+						logger.error("Node {}, failed to get a response for message sent".format(self.node_id))
+				else:
+					logger.error("Node {}, timeout, failed to receive reply".format(self.node_id))
+		else:
+			logger.error("Node {}, timeout, failed to send message".format(self.node_id))
+
+		socket.close()
+
+	def start_election(self):
+		logger.info("Node {}, staring election".format(self.node_id))
+
+		# Transition to candidate state
+		self.state = "CANDIDATE"
+		logger.info("Node {}, switched to CANDIDATE".format(self.node_id))
+
+		# Increment term
+		self.term += 1
+
+		# Vote for himself
+		self.votes_received = 1
+		self.voted_for = self.node_id
+		
+		# Request for votes from peers
+		sending_threads = []
+		for node_id in self.peers:
+			vote_request = RequestVoteArgs(self.term, self.node_id, self.last_log_index, self.last_log_term)
+			thread = threading.Thread(target=self.send_message, args=(node_id, vote_request, self.timeout))
+			sending_threads.append(thread)
+			thread.start()
+		for thread in sending_threads:
+			thread.join()
+
 	def start_heartbeat(self):
 		# Start thread for each follower to send heartbeat in a loop
 		peer_threads = []
@@ -196,9 +202,12 @@ class RaftNode:
 			logger.info("Node {}, sending heartbeat to {}".format(self.node_id, target_node_id))
 			start = time.time()
 			message = AppendEntryArgs(self.term, self.node_id, None, None, None, self.commit_index)
-			self.send_message(target_node_id, message)
+			timeout = start + (config['heartbeat_delay'] / 1000)
+			self.send_message(target_node_id, message, timeout)
 			delta = time.time() - start
-			time.sleep((config['heartbeat_delay']- delta) / 1000)
+			if delta > 0:
+				time.sleep((config['heartbeat_delay']- delta) / 1000)
+		socket.close()
 
 	""" NOT COMPLETE """
 	def append_entries(self, message):
@@ -228,6 +237,7 @@ class RaftNode:
 			reply = RequestVoteReply(self.term, False)
 			return reply
 
+		logger.info("Node {}, voted for {}".format(self.node_id, message.candidate_id))
 		# Vote for the requesting candidate
 		self.voted_for = message.candidate_id
 		self.term = message.term
