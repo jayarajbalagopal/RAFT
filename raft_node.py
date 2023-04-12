@@ -1,3 +1,4 @@
+from flask import Flask, request
 import zmq
 import threading
 import logging
@@ -13,15 +14,33 @@ from messages import (AppendEntryArgs, AppendEntryReply,
 
 logger = logging.getLogger('raft_logger')
 config = parse_config()
+app = Flask(__name__)
+
+@app.route('/submit', methods=['POST'])
+def submit():
+    data = request.form.to_dict()
+    print(data)
+    return 'Data received'
+
+
+def run_server(target_port):
+    app.run(debug=False, port=target_port)
+
+
 
 class RaftNode:
-	def __init__(self, node_id, node_addresses):
+	def __init__(self, node_id, node_addresses,ports):
 		# Address and ID information
 		self.node_id = node_id
 		self.node_addresses = node_addresses
 		self.node_address = self.node_addresses[self.node_id]
 		self.node_ids = list(range(len(self.node_addresses)))
 		self.peers = self.node_ids[:self.node_id] + self.node_ids[self.node_id+1:]
+		
+		#flask server
+		self.flask_ports=ports
+		self.target_port = ports[node_id]
+
 
 		# Messaging context
 		self.context = zmq.Context()
@@ -51,6 +70,10 @@ class RaftNode:
 		logger.info("Node {}, initialized as {}".format(self.node_id, self.state))
 
 	def start(self):
+		#flask server thread for client connection
+		server_thread = threading.Thread(target=run_server,args=(self.target_port,))
+		server_thread.start()
+
 		# Start the node listening thread
 		logger.info("Node {}, starting async listen channel".format(self.node_id))
 		self.listen_thread = threading.Thread(target=self.async_listen)
@@ -213,6 +236,7 @@ class RaftNode:
 	def append_entries(self, message):
 		# Reset timer, because leader is alive, append entry send only by leader.
 		self.set_randomized_timeout()
+		
 		reply = AppendEntryReply(self.term, True)
 		return reply
 
@@ -232,7 +256,7 @@ class RaftNode:
 			reply = RequestVoteReply(self.term, False)
 			return reply
 
-		# Logs are same, therefor compare term
+		# Logs are same, therefore compare term
 		if message.last_log_term == self.last_log_term and message.last_log_index < self.last_log_index:
 			reply = RequestVoteReply(self.term, False)
 			return reply

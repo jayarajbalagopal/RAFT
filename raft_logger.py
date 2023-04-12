@@ -10,7 +10,7 @@ if config['log_level'] == 'ERROR':
 elif config['log_level'] == 'DEBUG':
     log_level = logging.DEBUG
 else:
-    log_level = loggin.INFO
+    log_level = logging.INFO
 
 logger = logging.getLogger('raft_logger')
 logger.setLevel(log_level)
