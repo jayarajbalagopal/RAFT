@@ -15,8 +15,10 @@ class AppendEntryArgs:
         self.leader_commit = leader_commit
 
 class AppendEntryReply:
-    def __init__(self, term, success):
+    def __init__(self,follower_id, term,acked_len, success):
+        self.follower_id=follower_id
         self.term = term
+        self.acked_len=acked_len
         self.success = success
 
 class RequestVoteArgs:

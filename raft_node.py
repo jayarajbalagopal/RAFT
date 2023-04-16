@@ -14,17 +14,17 @@ from messages import (AppendEntryArgs, AppendEntryReply,
 
 logger = logging.getLogger('raft_logger')
 config = parse_config()
-app = Flask(__name__)
+# app = Flask(__name__)
 
-@app.route('/submit', methods=['POST'])
-def submit():
-    data = request.form.to_dict()
-    print(data)
-    return 'Data received'
+# @app.route('/submit', methods=['POST'])
+# def submit():
+#     data = request.form.to_dict()['data']
+#     print(data)
+#     return 'Data received'
 
 
-def run_server(target_port):
-    app.run(debug=False, port=target_port)
+# def run_server(target_port):
+#     app.run(debug=False, port=target_port)
 
 
 
@@ -40,6 +40,8 @@ class RaftNode:
 		#flask server
 		self.flask_ports=ports
 		self.target_port = ports[node_id]
+		self.app=Flask(__name__)
+		self.app.route('/submit', methods=['POST'])(self.submit)
 
 
 		# Messaging context
@@ -52,18 +54,21 @@ class RaftNode:
 		# Raft variables
 		self.state = "FOLLOWER"
 		self.term = 0
-		self.log = [{'term': 0, 'command': 'None'}]
+		# self.log = [{'term': 0, 'command': 'None'}]
+		self.log=[]
 		self.commit_index = 0
 		self.conflict_term = None
 		self.conflict_index = None
 		self.last_log_index = 0
 		self.last_log_term = 0
+		self.acked_length = [-1 for _ in range(len(self.node_addresses))]
+		self.sent_length = [-1 for _ in range(len(self.node_addresses))]
 
 		# Election parameters
-		self.voted_for = -1
+		self.leader_id = None
+		self.voted_for = None
 		self.votes_received = 0
 		self.vote_request_threads = []
-
 		self.majority = ((len(self.peers) + 1) // 2) + 1
 
 		# Node startup log
@@ -71,7 +76,7 @@ class RaftNode:
 
 	def start(self):
 		#flask server thread for client connection
-		server_thread = threading.Thread(target=run_server,args=(self.target_port,))
+		server_thread = threading.Thread(target=self.run_server,args=(self.target_port,))
 		server_thread.start()
 
 		# Start the node listening thread
@@ -86,6 +91,24 @@ class RaftNode:
 		logger.info("Node {}, starting async timeout thread".format(self.node_id))
 		self.timeout_thread = threading.Thread(target=self.async_timeout_thread)
 		self.timeout_thread.start()
+		
+	def submit(self):
+		data = request.form.to_dict()['data']
+		if(self.state=="LEADER"):
+			logger.info(f"Data received in leader id {self.node_id}")
+			self.log.append({"term": self.term,"command":data})
+			self.acked_length[self.node_id]=len(self.log)
+			logger.info(f"Leader Log : \n {self.log}")
+
+		else:
+			url = 'http://localhost:2000/submit'
+			data_leader = {'data': data}
+			response = requests.post(url, data=data_leader)
+		return 'Data received'
+
+
+	def run_server(self,target_port):
+		self.app.run(debug=False, port=target_port)
 
 	def async_listen(self):
 		while True:
@@ -97,7 +120,7 @@ class RaftNode:
 				# Recived a append entry message
 				if isinstance(message, AppendEntryArgs):
 					logger.info("Node {}, received append entry".format(self.node_id))
-					reply = self.append_entries(message)
+					reply = self.log_check(message)
 					self.listen_socket.send_pyobj(reply)
 
 				# Received a vote request
@@ -130,7 +153,7 @@ class RaftNode:
 				# Wait for the remaining time
 				time.sleep(delta)
 		self.start_heartbeat()
-
+    
 	def handle_reponse(self, message):
 		# Response to vote request
 		if isinstance(message, RequestVoteReply):
@@ -148,10 +171,19 @@ class RaftNode:
 		# Response to append entry
 		if isinstance(message, AppendEntryReply):
 			logger.info("Node {}, Append entry reply".format(self.node_id))
+
+
+			if message.term == self.term and self.state=="LEADER":
+				self.process_ack(message.follower_id, message.term,message.acked_len, message.success)
+
 			if message.term > self.term:
 				self.term = message.term
 				if self.state == "CANDIDATE":
 					self.state = "FOLLOWER"
+				self.voted_for=None
+			
+
+	
 
 	def send_message(self, target_node_id, message, timeout): 
 		# Send message and wait for reply
@@ -224,21 +256,97 @@ class RaftNode:
 		while self.state == "LEADER":
 			logger.info("Node {}, sending heartbeat to {}".format(self.node_id, target_node_id))
 			start = time.time()
-			message = AppendEntryArgs(self.term, self.node_id, None, None, None, self.commit_index)
+			prev_log_index=self.sent_length[target_node_id]
+			entries=self.log[prev_log_index+1:]
+			prev_log_term=0
+			if(prev_log_index>=0):
+				prev_log_term=self.log[prev_log_index]["term"]
+			message = AppendEntryArgs(self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index)
 			timeout = start + (config['heartbeat_delay'] / 1000)
 			self.send_message(target_node_id, message, timeout)
 			delta = time.time() - start
 			if delta > 0:
 				time.sleep((config['heartbeat_delay']- delta) / 1000)
-		socket.close()
+		# socket.close()
+
 
 	""" NOT COMPLETE """
-	def append_entries(self, message):
+	def log_check(self, message):
 		# Reset timer, because leader is alive, append entry send only by leader.
 		self.set_randomized_timeout()
+
+		if(message.term>self.term):
+			self.term=message.term
+			self.voted_for=None
+			self.state="FOLLOWER"
+			self.leader_id=message.leader_id
+	
+		if (message.term==self.term and self.state=="CANDIDATE"):
+			self.state="FOLLOWER"
+			self.leader_id=message.leader_id
 		
-		reply = AppendEntryReply(self.term, True)
+		logOK=(len(self.log)>0)and(len(self.log)>=message.prev_log_index+1)and(message.prev_log_term==self.log[-1]["term"])
+
+		if(message.term==self.term and logOK):
+			# adding entry
+			self.append_entry(message.prev_log_index,message.leader_commit,message.entries)
+
+			acked_len=message.prev_log_index+len(message.entries)
+			reply=AppendEntryReply(self.node_id,self.term,acked_len,True)
+			return reply
+
+		if(len(self.log)==0):
+			reply=AppendEntryReply(self.node_id,self.term,0,True)
+			return reply
+
+
+		reply = AppendEntryReply(self.node_id,self.term,0, False)
 		return reply
+	
+	
+
+	def append_entry(self,prev_log_index,leader_commit,entries):
+		if(len(entries)>0 and len(self.log)>prev_log_index):
+			if(self.log[prev_log_index+1]["term"]!=entries[0]["term"]):
+				self.log=self.log[:prev_log_index]
+		
+		if(prev_log_index+1+len(entries)>len(self.log)):
+			new_entry_index=len(self.log)-prev_log_index-1
+			self.log.append(entries[new_entry_index:])
+
+		if(leader_commit>self.commit_index):
+			logger.info(f"Node {self.node_id} Commit Log: \n {self.log[:leader_commit]}")
+			self.commit_index=leader_commit
+	
+
+
+	def process_ack(self,follower_id, term,acked_len, success):
+		if(success==True and acked_len>=self.acked_length[follower_id]):
+			self.sent_length[follower_id]=acked_len
+			self.acked_length[follower_id]=acked_len
+			self.commit_log_entries()
+		elif self.sent_length[follower_id]>0:
+			#trying with a lower index to get the follower in sync
+			self.sent_length[follower_id]-=1
+
+			#new message will be sent with the next heartbeat
+	
+
+	def commit_log_entries(self):
+		max_ready=0
+		for i in range(len(self.log),0,-1):
+			k=0
+			for follower_id in self.peers:
+				if self.acked_length[follower_id]>=i:
+					k+=1
+			if(k>=self.majority):
+				max_ready=i
+				break
+		if max_ready>0 and max_ready>self.commit_index and self.log[max_ready-1].term==self.term :
+			logger.info(f"Log commited Leader ID {self.node_id}:\n{self.log[self.commit_index:max_ready]}")
+			self.commit_index=max_ready
+
+
 
 	def vote(self, message):
 		# You have a higher term
@@ -247,7 +355,7 @@ class RaftNode:
 			return reply
 
 		# Vote already granted
-		if self.voted_for != -1 and self.voted_for != message.candidate_id:
+		if self.voted_for != None and self.voted_for != message.candidate_id:
 			reply = RequestVoteReply(self.term, False)
 			return reply
 
@@ -266,7 +374,7 @@ class RaftNode:
 		self.voted_for = message.candidate_id
 		self.term = message.term
 		reply = RequestVoteReply(self.term, True)
-		return reply
+		return reply 
 
 	def set_randomized_timeout(self):
 		# Reset the election timeout value
