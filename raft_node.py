@@ -25,8 +25,14 @@ config = parse_config()
 
 # def run_server(target_port):
 #     app.run(debug=False, port=target_port)
-
-
+def l(arg):
+	n=[name for name,i in locals().items() if i==arg]
+	return n[0]
+def f(*args):
+	s=""
+	for arg in args:
+		s+=f" {l(arg)} => {arg} "
+	logger.info(s)
 
 class RaftNode:
 	def __init__(self, node_id, node_addresses,ports):
@@ -59,9 +65,9 @@ class RaftNode:
 		self.commit_index = 0
 		self.conflict_term = None
 		self.conflict_index = None
-		self.last_log_index = 0
-		self.last_log_term = 0
-		self.acked_length = [-1 for _ in range(len(self.node_addresses))]
+		self.last_log_index = -1
+		self.last_log_term = -1
+		self.acked_length = [0 for _ in range(len(self.node_addresses))]
 		self.sent_length = [-1 for _ in range(len(self.node_addresses))]
 
 		# Election parameters
@@ -73,7 +79,6 @@ class RaftNode:
 
 		# Node startup log
 		logger.info("Node {}, initialized as {}".format(self.node_id, self.state))
-
 	def start(self):
 		#flask server thread for client connection
 		server_thread = threading.Thread(target=self.run_server,args=(self.target_port,))
@@ -101,6 +106,7 @@ class RaftNode:
 			logger.info(f"Leader Log : \n {self.log}")
 
 		else:
+			logger.info(f"Data received in follower id {self.node_id}")
 			url = 'http://localhost:2000/submit'
 			data_leader = {'data': data}
 			response = requests.post(url, data=data_leader)
@@ -171,12 +177,15 @@ class RaftNode:
 		# Response to append entry
 		if isinstance(message, AppendEntryReply):
 			logger.info("Node {}, Append entry reply".format(self.node_id))
-
+			
+			logger.info(f"terms->{message.term, self.term}")
 
 			if message.term == self.term and self.state=="LEADER":
+				logging.info(f"processing ack from {message.follower_id}")
 				self.process_ack(message.follower_id, message.term,message.acked_len, message.success)
 
 			if message.term > self.term:
+				logger.info(f"Higher Term received stepping down")
 				self.term = message.term
 				if self.state == "CANDIDATE":
 					self.state = "FOLLOWER"
@@ -256,12 +265,18 @@ class RaftNode:
 		while self.state == "LEADER":
 			logger.info("Node {}, sending heartbeat to {}".format(self.node_id, target_node_id))
 			start = time.time()
-			prev_log_index=self.sent_length[target_node_id]
-			entries=self.log[prev_log_index+1:]
-			prev_log_term=0
-			if(prev_log_index>=0):
-				prev_log_term=self.log[prev_log_index]["term"]
-			message = AppendEntryArgs(self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index)
+			if len(self.log)>0:
+				prev_log_index=self.sent_length[target_node_id]
+				entries=self.log[prev_log_index:]
+				prev_log_term=0
+				# print(self.log,prev_log_index)
+				if(prev_log_index>=0):
+					prev_log_term=self.log[prev_log_index-1]["term"]
+				message = AppendEntryArgs(self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index)
+				logger.info(f"sending append entry msg :{self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index}")
+			else :
+				message = AppendEntryArgs(self.term, self.node_id, [], -1, -1, self.commit_index)
+				logger.info(f"sending empty append entry heartbeat ")
 			timeout = start + (config['heartbeat_delay'] / 1000)
 			self.send_message(target_node_id, message, timeout)
 			delta = time.time() - start
@@ -274,7 +289,7 @@ class RaftNode:
 	def log_check(self, message):
 		# Reset timer, because leader is alive, append entry send only by leader.
 		self.set_randomized_timeout()
-
+		logger.info(f"Node id {self.node_id} ->Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
 		if(message.term>self.term):
 			self.term=message.term
 			self.voted_for=None
@@ -285,10 +300,23 @@ class RaftNode:
 			self.state="FOLLOWER"
 			self.leader_id=message.leader_id
 		
-		logOK=(len(self.log)>0)and(len(self.log)>=message.prev_log_index+1)and(message.prev_log_term==self.log[-1]["term"])
+
+		index_consistency = len(self.log)>=message.prev_log_index
+		if(len(self.log)==0):
+			term_consistency=True
+		else:
+			print("term consistency check->",message.prev_log_term,self.log[-1])
+			print(self.log)
+			term_consistency=(message.prev_log_term==self.log[-1]["term"])
+		logOK=(index_consistency)and(term_consistency)
+		
+		print(message.term,self.term,logOK)
+		print(len(self.log),message.prev_log_index)
+
 
 		if(message.term==self.term and logOK):
 			# adding entry
+			logger.info(f"LogOK at {self.node_id} \n Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
 			self.append_entry(message.prev_log_index,message.leader_commit,message.entries)
 
 			acked_len=message.prev_log_index+len(message.entries)
@@ -306,13 +334,18 @@ class RaftNode:
 	
 
 	def append_entry(self,prev_log_index,leader_commit,entries):
+
 		if(len(entries)>0 and len(self.log)>prev_log_index):
-			if(self.log[prev_log_index+1]["term"]!=entries[0]["term"]):
+			if(prev_log_index!=-1 and self.log[prev_log_index]["term"]!=entries[0]["term"]):
+				#log truncation due to inconsistency
 				self.log=self.log[:prev_log_index]
+
+				logger.info(f"Log truncated at {self.node_id} : {self.log}")
 		
-		if(prev_log_index+1+len(entries)>len(self.log)):
+		if(prev_log_index+len(entries)>len(self.log)):
 			new_entry_index=len(self.log)-prev_log_index-1
-			self.log.append(entries[new_entry_index:])
+			self.log+=entries[new_entry_index:]
+			logger.info(f"Log append at {self.node_id} : {self.log}")
 
 		if(leader_commit>self.commit_index):
 			logger.info(f"Node {self.node_id} Commit Log: \n {self.log[:leader_commit]}")
@@ -321,30 +354,47 @@ class RaftNode:
 
 
 	def process_ack(self,follower_id, term,acked_len, success):
+		# print()
+		f("process ack=>",follower_id, term,acked_len, success,self.acked_length[follower_id])
+
+
 		if(success==True and acked_len>=self.acked_length[follower_id]):
 			self.sent_length[follower_id]=acked_len
 			self.acked_length[follower_id]=acked_len
-			self.commit_log_entries()
+			f("Success ack commiting",len(self.log))
+			if(len(self.log)>0):
+				self.commit_log_entries()
 		elif self.sent_length[follower_id]>0:
 			#trying with a lower index to get the follower in sync
 			self.sent_length[follower_id]-=1
+			f("Unsuccess ack retrying with",self.sent_length[follower_id])
 
 			#new message will be sent with the next heartbeat
 	
 
 	def commit_log_entries(self):
+		f("commit log entries=>")
 		max_ready=0
 		for i in range(len(self.log),0,-1):
 			k=0
+			f("check max_ready",i,self.acked_length,self.peers)
 			for follower_id in self.peers:
 				if self.acked_length[follower_id]>=i:
 					k+=1
+			f("follower ack length checked",i,k)
 			if(k>=self.majority):
+				f("got majority ack",i,k)
 				max_ready=i
 				break
-		if max_ready>0 and max_ready>self.commit_index and self.log[max_ready-1].term==self.term :
+			f("didnt get majority ack")
+
+		f("commit log entries<=",max_ready,self.log,self.commit_index,self.term)
+
+		if max_ready>0 and max_ready>self.commit_index and self.log[max_ready-1]['term']==self.term :
 			logger.info(f"Log commited Leader ID {self.node_id}:\n{self.log[self.commit_index:max_ready]}")
 			self.commit_index=max_ready
+		f("check5")
+
 
 
 
@@ -386,6 +436,6 @@ class RaftNode:
 
 	def reset_election_params(self):
 		# Reset, granted and received votes 
-		self.vote_granted = -1
+		self.voted_for = None
 		self.votes_received = 0
 
