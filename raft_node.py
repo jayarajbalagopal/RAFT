@@ -1,3 +1,5 @@
+import os
+import pickle
 from flask import Flask, request
 import zmq
 import threading
@@ -25,14 +27,7 @@ config = parse_config()
 
 # def run_server(target_port):
 #     app.run(debug=False, port=target_port)
-def l(arg):
-	n=[name for name,i in locals().items() if i==arg]
-	return n[0]
-def f(*args):
-	s=""
-	for arg in args:
-		s+=f" {l(arg)} => {arg} "
-	logger.info(s)
+
 
 class RaftNode:
 	def __init__(self, node_id, node_addresses,ports):
@@ -43,6 +38,37 @@ class RaftNode:
 		self.node_ids = list(range(len(self.node_addresses)))
 		self.peers = self.node_ids[:self.node_id] + self.node_ids[self.node_id+1:]
 		
+
+
+
+
+		# Raft variables
+		self.state = "FOLLOWER"
+		self.term = 0
+		# self.log = [{'term': 0, 'command': 'None'}]
+		self.log=[]
+		self.commit_index = 0
+		self.conflict_term = None
+		self.conflict_index = None
+		self.last_log_index = -1
+		self.last_log_term = -1
+		self.acked_length = [0 for _ in range(len(self.node_addresses))]
+		self.sent_length = [0 for _ in range(len(self.node_addresses))]
+
+		# Election parameters
+		self.leader_id = -1
+		self.voted_for = None
+		self.votes_received = 0
+		self.vote_request_threads = []
+		self.majority = ((len(self.peers) + 1) // 2) + 1
+
+		#load from state file if it exists
+		logfolder = "state"
+
+		filepath_check = os.path.join(logfolder, f"{self.node_id}.state")
+		if os.path.exists(filepath_check):
+			self.restore_state()
+
 		#flask server
 		self.flask_ports=ports
 		self.target_port = ports[node_id]
@@ -57,29 +83,12 @@ class RaftNode:
 		self.poller = zmq.Poller()
 		self.poller.register(self.listen_socket, zmq.POLLIN)
 
-		# Raft variables
-		self.state = "FOLLOWER"
-		self.term = 0
-		# self.log = [{'term': 0, 'command': 'None'}]
-		self.log=[]
-		self.commit_index = 0
-		self.conflict_term = None
-		self.conflict_index = None
-		self.last_log_index = -1
-		self.last_log_term = -1
-		self.acked_length = [0 for _ in range(len(self.node_addresses))]
-		self.sent_length = [-1 for _ in range(len(self.node_addresses))]
-
-		# Election parameters
-		self.leader_id = None
-		self.voted_for = None
-		self.votes_received = 0
-		self.vote_request_threads = []
-		self.majority = ((len(self.peers) + 1) // 2) + 1
 
 		# Node startup log
 		logger.info("Node {}, initialized as {}".format(self.node_id, self.state))
 	def start(self):
+
+
 		#flask server thread for client connection
 		server_thread = threading.Thread(target=self.run_server,args=(self.target_port,))
 		server_thread.start()
@@ -96,6 +105,8 @@ class RaftNode:
 		logger.info("Node {}, starting async timeout thread".format(self.node_id))
 		self.timeout_thread = threading.Thread(target=self.async_timeout_thread)
 		self.timeout_thread.start()
+		logger.info(f"{self.__dict__}")
+
 		
 	def submit(self):
 		data = request.form.to_dict()['data']
@@ -107,7 +118,11 @@ class RaftNode:
 
 		else:
 			logger.info(f"Data received in follower id {self.node_id}")
-			url = 'http://localhost:2000/submit'
+			port=self.flask_ports[self.leader_id]
+			try:
+				url = f'http://localhost:{port}/submit'
+			except:
+				logger.info("Leader not available")
 			data_leader = {'data': data}
 			response = requests.post(url, data=data_leader)
 		return 'Data received'
@@ -216,8 +231,8 @@ class RaftNode:
 					try:
 						reply = socket.recv_pyobj()
 						self.handle_reponse(reply)
-					except:
-						logger.error("Node {}, failed to get a response for message sent".format(self.node_id))
+					except Exception as e:
+						logger.error(f"Node {self.node_id}, failed to get a response for message sent\nError:{e}")
 				else:
 					logger.error("Node {}, timeout, failed to receive reply".format(self.node_id))
 		else:
@@ -273,9 +288,11 @@ class RaftNode:
 				if(prev_log_index>=0):
 					prev_log_term=self.log[prev_log_index-1]["term"]
 				message = AppendEntryArgs(self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index)
+				logger.info("{self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index}")
 				logger.info(f"sending append entry msg :{self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index}")
 			else :
-				message = AppendEntryArgs(self.term, self.node_id, [], -1, -1, self.commit_index)
+				#Empty append entry as heartbeat
+				message = AppendEntryArgs(self.term, self.node_id, [], 0, 0, self.commit_index)
 				logger.info(f"sending empty append entry heartbeat ")
 			timeout = start + (config['heartbeat_delay'] / 1000)
 			self.send_message(target_node_id, message, timeout)
@@ -285,10 +302,11 @@ class RaftNode:
 		# socket.close()
 
 
-	""" NOT COMPLETE """
+
 	def log_check(self, message):
 		# Reset timer, because leader is alive, append entry send only by leader.
 		self.set_randomized_timeout()
+		logger.info("Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
 		logger.info(f"Node id {self.node_id} ->Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
 		if(message.term>self.term):
 			self.term=message.term
@@ -305,17 +323,15 @@ class RaftNode:
 		if(len(self.log)==0):
 			term_consistency=True
 		else:
-			print("term consistency check->",message.prev_log_term,self.log[-1])
-			print(self.log)
 			term_consistency=(message.prev_log_term==self.log[-1]["term"])
 		logOK=(index_consistency)and(term_consistency)
-		
-		print(message.term,self.term,logOK)
-		print(len(self.log),message.prev_log_index)
+		logger.info("message.term,self.term,logOK,len(self.log),message.prev_log_index")
+		logger.info(f"{message.term,self.term,logOK,len(self.log),message.prev_log_index}")
 
 
 		if(message.term==self.term and logOK):
 			# adding entry
+			logger.info("LogOK at {self.node_id} \n Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
 			logger.info(f"LogOK at {self.node_id} \n Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
 			self.append_entry(message.prev_log_index,message.leader_commit,message.entries)
 
@@ -343,57 +359,92 @@ class RaftNode:
 				logger.info(f"Log truncated at {self.node_id} : {self.log}")
 		
 		if(prev_log_index+len(entries)>len(self.log)):
-			new_entry_index=len(self.log)-prev_log_index-1
+			new_entry_index=len(self.log)-prev_log_index
 			self.log+=entries[new_entry_index:]
 			logger.info(f"Log append at {self.node_id} : {self.log}")
+		logger.info("{leader_commit,self.commit_index}")
+		logger.info(f"{leader_commit,self.commit_index}")
 
+		#commit upto which point leader have committed
 		if(leader_commit>self.commit_index):
 			logger.info(f"Node {self.node_id} Commit Log: \n {self.log[:leader_commit]}")
+			logfolder = "logs"
+			if not os.path.exists(logfolder):
+				os.makedirs(logfolder)
+			filepath = os.path.join(logfolder, f"{self.node_id}.txt")
+			logger.info(f"filepath:{filepath}")
+			
+			with open(filepath, "a") as fl:
+				current_commit = self.log[self.commit_index:leader_commit]
+				for i in current_commit:
+					fl.writelines(f"{i}\n")
+
 			self.commit_index=leader_commit
+			self.save_state()
 	
 
 
 	def process_ack(self,follower_id, term,acked_len, success):
 		# print()
-		f("process ack=>",follower_id, term,acked_len, success,self.acked_length[follower_id])
+		logger.info("process ack=>,{follower_id, term,acked_len, success,self.acked_length[follower_id]}")
+		logger.info(f"process ack=>,{follower_id, term,acked_len, success,self.acked_length[follower_id]}")
 
 
 		if(success==True and acked_len>=self.acked_length[follower_id]):
 			self.sent_length[follower_id]=acked_len
 			self.acked_length[follower_id]=acked_len
-			f("Success ack commiting",len(self.log))
+			logger.info("Success ack commiting,{len(self.log)}")
+			logger.info(f"Success ack commiting,{len(self.log)}")
 			if(len(self.log)>0):
 				self.commit_log_entries()
 		elif self.sent_length[follower_id]>0:
 			#trying with a lower index to get the follower in sync
 			self.sent_length[follower_id]-=1
-			f("Unsuccess ack retrying with",self.sent_length[follower_id])
+			logger.info(f"Unsuccess ack retrying with,{self.sent_length[follower_id]}")
+			logger.info(f"Unsuccess ack retrying with,{self.sent_length[follower_id]}")
 
 			#new message will be sent with the next heartbeat
 	
 
 	def commit_log_entries(self):
-		f("commit log entries=>")
+		logger.info("commit log entries=>")
 		max_ready=0
 		for i in range(len(self.log),0,-1):
-			k=0
-			f("check max_ready",i,self.acked_length,self.peers)
+			#leader is always ready at the latest index
+			k=1
+			logger.info("check max_ready,{i,self.acked_length,self.peers}")
+			logger.info(f"check max_ready,{i,self.acked_length,self.peers}")
 			for follower_id in self.peers:
 				if self.acked_length[follower_id]>=i:
 					k+=1
-			f("follower ack length checked",i,k)
 			if(k>=self.majority):
-				f("got majority ack",i,k)
+				logger.info("got majority ack,{i,k}")
+				logger.info(f"got majority ack,{i,k}")
 				max_ready=i
 				break
-			f("didnt get majority ack")
+			logger.info("didnt get majority ack")
 
-		f("commit log entries<=",max_ready,self.log,self.commit_index,self.term)
-
+		logger.info(f"commit log entries<=,{max_ready,self.log,self.commit_index,self.term}")
+		logger.info(f"commit log entries<=,{max_ready,self.log,self.commit_index,self.term}")
+		
 		if max_ready>0 and max_ready>self.commit_index and self.log[max_ready-1]['term']==self.term :
-			logger.info(f"Log commited Leader ID {self.node_id}:\n{self.log[self.commit_index:max_ready]}")
+			logger.info(f"Commit Log: Leader ID {self.node_id}:\n{self.log[self.commit_index:max_ready]}")
+
+			logfolder = "logs"
+			if not os.path.exists(logfolder):
+				os.makedirs(logfolder)
+			filepath = os.path.join(logfolder, f"{self.node_id}.txt")
+			logger.info(f"filepath leader:{filepath}")
+			# f=open(filepath, "a")
+			# f.close()
+			with open(filepath, "a") as fl:
+				current_commits = self.log[self.commit_index:max_ready]
+				for commit in current_commits:
+					fl.writelines(f"{commit}\n")
+			
+			
 			self.commit_index=max_ready
-		f("check5")
+			self.save_state()
 
 
 
@@ -439,3 +490,24 @@ class RaftNode:
 		self.voted_for = None
 		self.votes_received = 0
 
+	def save_state(self):
+		logfolder = "state"
+		if not os.path.exists(logfolder):
+			os.makedirs(logfolder)
+		filepath = os.path.join(logfolder, f"{self.node_id}.state")
+		class_dict={}
+		for k,v in self.__dict__.items():
+			class_dict[k]=v
+		not_picklable=['app','context','listen_socket','poller','timeout_thread','listen_thread']
+		for key in not_picklable:
+			del class_dict[key]
+		logger.info(f"saving state->{class_dict}")
+		with open(filepath, 'wb') as f:
+			pickle.dump(class_dict, f)
+
+	def restore_state(self):
+		logfolder = "state"
+		filepath = os.path.join(logfolder, f"{self.node_id}.state")		
+		with open(filepath, 'rb') as f:
+			state = pickle.load(f)
+			self.__dict__.update(state)

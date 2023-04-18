@@ -14,7 +14,8 @@ else:
 
 logger = logging.getLogger('raft_logger')
 logger.setLevel(log_level)
-formatter = formatter = logging.Formatter('%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s')
+# formatter = formatter = logging.Formatter('%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s')
+formatter = formatter = logging.Formatter('[%(filename)s:%(lineno)d] %(message)s')
 
 
 stdout_handler = logging.StreamHandler(sys.stdout)
