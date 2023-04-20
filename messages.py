@@ -29,6 +29,7 @@ class RequestVoteArgs:
         self.last_log_term = last_log_term
 
 class RequestVoteReply:
-    def __init__(self, term, vote_granted):
+    def __init__(self,voter_id, term, vote_granted):
+        self.voter_id=voter_id
         self.term = term
         self.vote_granted = vote_granted

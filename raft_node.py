@@ -86,6 +86,7 @@ class RaftNode:
 
 		# Node startup log
 		logger.info("Node {}, initialized as {}".format(self.node_id, self.state))
+		logger.info(f"{self.__dict__}")
 	def start(self):
 
 
@@ -105,7 +106,6 @@ class RaftNode:
 		logger.info("Node {}, starting async timeout thread".format(self.node_id))
 		self.timeout_thread = threading.Thread(target=self.async_timeout_thread)
 		self.timeout_thread.start()
-		logger.info(f"{self.__dict__}")
 
 		
 	def submit(self):
@@ -114,17 +114,22 @@ class RaftNode:
 			logger.info(f"Data received in leader id {self.node_id}")
 			self.log.append({"term": self.term,"command":data})
 			self.acked_length[self.node_id]=len(self.log)
+			self.last_log_index=len(self.log)
+			self.last_log_term=self.log[-1]['term']
 			logger.info(f"Leader Log : \n {self.log}")
 
 		else:
 			logger.info(f"Data received in follower id {self.node_id}")
-			port=self.flask_ports[self.leader_id]
-			try:
-				url = f'http://localhost:{port}/submit'
-			except:
-				logger.info("Leader not available")
-			data_leader = {'data': data}
-			response = requests.post(url, data=data_leader)
+			if(self.leader_id!=-1):
+				port=self.flask_ports[self.leader_id]
+				try:
+					url = f'http://localhost:{port}/submit'
+				except:
+					logger.info("Leader not available")
+				data_leader = {'data': data}
+				response = requests.post(url, data=data_leader)
+			else:
+				logger.info("Leader not elected yet")
 		return 'Data received'
 
 
@@ -160,7 +165,7 @@ class RaftNode:
 				# Transition to follower before starting election.
 				self.state = "FOLLOWER"
 				self.reset_election_params()
-
+				
 				# Timeout, Set a new timeout and start the election.
 				self.set_randomized_timeout()
 				self.start_election()
@@ -241,7 +246,7 @@ class RaftNode:
 		socket.close()
 
 	def start_election(self):
-		logger.info("Node {}, staring election".format(self.node_id))
+		logger.info("Node {}, starting election".format(self.node_id))
 
 		# Transition to candidate state
 		self.state = "CANDIDATE"
@@ -306,6 +311,7 @@ class RaftNode:
 	def log_check(self, message):
 		# Reset timer, because leader is alive, append entry send only by leader.
 		self.set_randomized_timeout()
+		self.reset_election_params()
 		logger.info("Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
 		logger.info(f"Node id {self.node_id} ->Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
 		if(message.term>self.term):
@@ -361,6 +367,8 @@ class RaftNode:
 		if(prev_log_index+len(entries)>len(self.log)):
 			new_entry_index=len(self.log)-prev_log_index
 			self.log+=entries[new_entry_index:]
+			self.last_log_index=len(self.log)
+			self.last_log_term=self.log[-1]["term"]
 			logger.info(f"Log append at {self.node_id} : {self.log}")
 		logger.info("{leader_commit,self.commit_index}")
 		logger.info(f"{leader_commit,self.commit_index}")
@@ -424,8 +432,8 @@ class RaftNode:
 				break
 			logger.info("didnt get majority ack")
 
-		logger.info(f"commit log entries<=,{max_ready,self.log,self.commit_index,self.term}")
-		logger.info(f"commit log entries<=,{max_ready,self.log,self.commit_index,self.term}")
+		# logger.info(f"commit log entries<=,{max_ready,self.log,self.commit_index,self.term}")
+		# logger.info(f"commit log entries<=,{max_ready,self.log,self.commit_index,self.term}")
 		
 		if max_ready>0 and max_ready>self.commit_index and self.log[max_ready-1]['term']==self.term :
 			logger.info(f"Commit Log: Leader ID {self.node_id}:\n{self.log[self.commit_index:max_ready]}")
@@ -451,30 +459,35 @@ class RaftNode:
 
 	def vote(self, message):
 		# You have a higher term
+		logger.info("Voting req in {self.node_id}->{message.term,message.candidate_id, message.last_log_index, message.last_log_term}")
+		logger.info(f"Voting req in {self.node_id}->{message.term,message.candidate_id, message.last_log_index, message.last_log_term}")
+		logger.info(f"Voting req in {self.node_id}->{self.term,self.node_id, self.last_log_index, self.last_log_term}")
+		logger.info(f"{self.node_id} voted for {self.voted_for}")
+		
 		if message.term < self.term:
-			reply = RequestVoteReply(self.term, False)
+			reply = RequestVoteReply(self.node_id,self.term, False)
 			return reply
 
 		# Vote already granted
 		if self.voted_for != None and self.voted_for != message.candidate_id:
-			reply = RequestVoteReply(self.term, False)
+			reply = RequestVoteReply(self.node_id,self.term, False)
 			return reply
 
 		# Your logs are more upto date
 		if message.last_log_term < self.last_log_term:
-			reply = RequestVoteReply(self.term, False)
+			reply = RequestVoteReply(self.node_id,self.term, False)
 			return reply
 
 		# Logs are same, therefore compare term
 		if message.last_log_term == self.last_log_term and message.last_log_index < self.last_log_index:
-			reply = RequestVoteReply(self.term, False)
+			reply = RequestVoteReply(self.node_id,self.term, False)
 			return reply
 
 		logger.info("Node {}, voted for {}".format(self.node_id, message.candidate_id))
 		# Vote for the requesting candidate
 		self.voted_for = message.candidate_id
 		self.term = message.term
-		reply = RequestVoteReply(self.term, True)
+		reply = RequestVoteReply(self.node_id,self.term, True)
 		return reply 
 
 	def set_randomized_timeout(self):
@@ -496,11 +509,13 @@ class RaftNode:
 			os.makedirs(logfolder)
 		filepath = os.path.join(logfolder, f"{self.node_id}.state")
 		class_dict={}
+		saved_states=['term','log','commit_index','last_log_index','last_log_term','acked_length','sent_length']
 		for k,v in self.__dict__.items():
-			class_dict[k]=v
-		not_picklable=['app','context','listen_socket','poller','timeout_thread','listen_thread']
-		for key in not_picklable:
-			del class_dict[key]
+			if k in saved_states:
+				class_dict[k]=v
+		# not_picklable=['app','context','listen_socket','poller','timeout_thread','listen_thread']
+		# for key in not_picklable:
+		# 	del class_dict[key]
 		logger.info(f"saving state->{class_dict}")
 		with open(filepath, 'wb') as f:
 			pickle.dump(class_dict, f)
@@ -511,3 +526,4 @@ class RaftNode:
 		with open(filepath, 'rb') as f:
 			state = pickle.load(f)
 			self.__dict__.update(state)
+		logger.info(f"Server {self.node_id} rebooted.Current Log:{self.log}")

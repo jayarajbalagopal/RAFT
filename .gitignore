@@ -6,3 +6,5 @@ t.py
 .vscode/launch.json
 *.state
 *.txt
+runner.sh
+clean.sh
