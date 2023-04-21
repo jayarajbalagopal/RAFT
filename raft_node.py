@@ -16,17 +16,6 @@ from messages import (AppendEntryArgs, AppendEntryReply,
 
 logger = logging.getLogger('raft_logger')
 config = parse_config()
-# app = Flask(__name__)
-
-# @app.route('/submit', methods=['POST'])
-# def submit():
-#     data = request.form.to_dict()['data']
-#     print(data)
-#     return 'Data received'
-
-
-# def run_server(target_port):
-#     app.run(debug=False, port=target_port)
 
 
 class RaftNode:
@@ -86,7 +75,7 @@ class RaftNode:
 
 		# Node startup log
 		logger.info("Node {}, initialized as {}".format(self.node_id, self.state))
-		logger.info(f"{self.__dict__}")
+		# logger.info(f"{self.__dict__}")
 	def start(self):
 
 
@@ -109,17 +98,22 @@ class RaftNode:
 
 		
 	def submit(self):
-		data = request.form.to_dict()['data']
+		command_recvd = request.form.to_dict()
+		data = command_recvd['data']
+		ind=int(command_recvd["index"])
+		logger.info(f"Data recieved from client: {command_recvd}")
 		if(self.state=="LEADER"):
-			logger.info(f"Data received in leader id {self.node_id}")
-			self.log.append({"term": self.term,"command":data})
-			self.acked_length[self.node_id]=len(self.log)
-			self.last_log_index=len(self.log)
-			self.last_log_term=self.log[-1]['term']
-			logger.info(f"Leader Log : \n {self.log}")
+			if ind==len(self.log):
+				logger.info(f"Data: {data} received in leader id {self.node_id}")
+				self.log.append({"term": self.term,"command":data})
+				self.acked_length[self.node_id]=len(self.log)
+				self.sent_length[self.node_id]=len(self.log)
+				self.last_log_index=len(self.log)
+				self.last_log_term=self.log[-1]['term']
+				logger.info(f"Leader Log : \n {self.log}")
 
 		else:
-			logger.info(f"Data received in follower id {self.node_id}")
+			logger.info(f"Data: {data} received in follower id {self.node_id}")
 			if(self.leader_id!=-1):
 				port=self.flask_ports[self.leader_id]
 				try:
@@ -142,10 +136,11 @@ class RaftNode:
 			socks = dict(self.poller.poll())
 			if self.listen_socket in socks and socks[self.listen_socket] == zmq.POLLIN:
 				message = self.listen_socket.recv_pyobj()
-
+				
 				# Recived a append entry message
 				if isinstance(message, AppendEntryArgs):
-					logger.info("Node {}, received append entry".format(self.node_id))
+					logger.info("Node {}, received append entry/heartbeat".format(self.node_id))
+					
 					reply = self.log_check(message)
 					self.listen_socket.send_pyobj(reply)
 
@@ -183,25 +178,32 @@ class RaftNode:
 	def handle_reponse(self, message):
 		# Response to vote request
 		if isinstance(message, RequestVoteReply):
-			logger.info("Node {}, received vote reply".format(self.node_id))
+			logger.info("Node {}, received vote reply from{}".format(self.node_id,message.voter_id))
 			# Received a positive vote, increment vote count
-			if message.vote_granted:
+			# logger.info("VoteReply {self.state,message.vote_granted,message.term,self.term}")
+			# logger.info(f"VoteReply {self.state,message.vote_granted,message.term,self.term}")
+			if self.state=="CANDIDATE" and message.vote_granted and message.term==self.term:
 				self.votes_received += 1
 			# Received majority, covert to leader, reset election stats, start sending heartbeat to all followers.
-			if self.votes_received >= self.majority:
-				logger.info("Node {}, received majority, moving to LEADER".format(self.node_id))
-				self.state = "LEADER"
-				self.reset_election_params()
-				self.start_heartbeat()
+				if self.votes_received >= self.majority:
+					logger.info("Node {}, received majority, moving to LEADER".format(self.node_id))
+					self.state = "LEADER"
+					self.reset_election_params()
+					self.start_heartbeat()
+			elif message.term > self.term:
+				self.term=message.term
+				self.state="FOLLOWER"
+				self.voted_for=None
+				self.set_randomized_timeout()
 
 		# Response to append entry
 		if isinstance(message, AppendEntryReply):
 			logger.info("Node {}, Append entry reply".format(self.node_id))
 			
-			logger.info(f"terms->{message.term, self.term}")
+			# logger.info(f"terms->{message.term, self.term}")
 
 			if message.term == self.term and self.state=="LEADER":
-				logging.info(f"processing ack from {message.follower_id}")
+				logging.info(f"Processing ack from {message.follower_id}")
 				self.process_ack(message.follower_id, message.term,message.acked_len, message.success)
 
 			if message.term > self.term:
@@ -292,13 +294,14 @@ class RaftNode:
 				# print(self.log,prev_log_index)
 				if(prev_log_index>=0):
 					prev_log_term=self.log[prev_log_index-1]["term"]
-				message = AppendEntryArgs(self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index)
-				logger.info("{self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index}")
-				logger.info(f"sending append entry msg :{self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index}")
+				message = AppendEntryArgs(self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index,self.sent_length,self.acked_length)
+				logger.info(f"Sending append entry msg to {target_node_id}")
+				# logger.info("{self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index}")
+				# logger.info(f"sending append entry msg to {target_node_id} :{self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index}")
 			else :
 				#Empty append entry as heartbeat
-				message = AppendEntryArgs(self.term, self.node_id, [], 0, 0, self.commit_index)
-				logger.info(f"sending empty append entry heartbeat ")
+				message = AppendEntryArgs(self.term, self.node_id, [], 0, 0, self.commit_index,self.sent_length,self.acked_length)
+				logger.info(f"Sending empty append entry heartbeat to {target_node_id}")
 			timeout = start + (config['heartbeat_delay'] / 1000)
 			self.send_message(target_node_id, message, timeout)
 			delta = time.time() - start
@@ -312,17 +315,20 @@ class RaftNode:
 		# Reset timer, because leader is alive, append entry send only by leader.
 		self.set_randomized_timeout()
 		self.reset_election_params()
-		logger.info("Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
-		logger.info(f"Node id {self.node_id} ->Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
-		if(message.term>self.term):
+		# logger.info("Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
+		# logger.info(f"Node id {self.node_id} ->Message Entries:{message.term,message.prev_log_index,message.leader_commit,message.entries}")
+		# logger.info(f"{message.__dict__}")
+		self.sent_length=[max(x1,x2) for x1,x2 in zip(self.sent_length,message.sent_length)]
+		self.acked_length=[max(y1,y2) for y1,y2 in zip(self.acked_length,message.acked_length)]
+		if(message.term>=self.term):
 			self.term=message.term
 			self.voted_for=None
 			self.state="FOLLOWER"
 			self.leader_id=message.leader_id
 	
-		if (message.term==self.term and self.state=="CANDIDATE"):
-			self.state="FOLLOWER"
-			self.leader_id=message.leader_id
+		# if (message.term==self.term and self.state=="CANDIDATE"):
+		# 	self.state="FOLLOWER"
+		# 	self.leader_id=message.leader_id
 		
 
 		index_consistency = len(self.log)>=message.prev_log_index
@@ -331,14 +337,14 @@ class RaftNode:
 		else:
 			term_consistency=(message.prev_log_term==self.log[-1]["term"])
 		logOK=(index_consistency)and(term_consistency)
-		logger.info("message.term,self.term,logOK,len(self.log),message.prev_log_index")
-		logger.info(f"{message.term,self.term,logOK,len(self.log),message.prev_log_index}")
+		# logger.info("message.term,self.term,logOK,len(self.log),message.prev_log_index")
+		# logger.info(f"{message.term,self.term,logOK,len(self.log),message.prev_log_index}")
 
 
 		if(message.term==self.term and logOK):
 			# adding entry
-			logger.info("LogOK at {self.node_id} \n Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
-			logger.info(f"LogOK at {self.node_id} \n Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
+			# logger.info("LogOK at {self.node_id} \n Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
+			# logger.info(f"LogOK at {self.node_id} \n Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
 			self.append_entry(message.prev_log_index,message.leader_commit,message.entries)
 
 			acked_len=message.prev_log_index+len(message.entries)
@@ -370,17 +376,17 @@ class RaftNode:
 			self.last_log_index=len(self.log)
 			self.last_log_term=self.log[-1]["term"]
 			logger.info(f"Log append at {self.node_id} : {self.log}")
-		logger.info("{leader_commit,self.commit_index}")
-		logger.info(f"{leader_commit,self.commit_index}")
+		# logger.info("{leader_commit,self.commit_index}")
+		# logger.info(f"{leader_commit,self.commit_index}")
 
 		#commit upto which point leader have committed
 		if(leader_commit>self.commit_index):
-			logger.info(f"Node {self.node_id} Commit Log: \n {self.log[:leader_commit]}")
+			# logger.info(f"Node {self.node_id} Commit Log: \n {self.log[:leader_commit]}")
 			logfolder = "logs"
 			if not os.path.exists(logfolder):
 				os.makedirs(logfolder)
 			filepath = os.path.join(logfolder, f"{self.node_id}.txt")
-			logger.info(f"filepath:{filepath}")
+			# logger.info(f"filepath:{filepath}")
 			
 			with open(filepath, "a") as fl:
 				current_commit = self.log[self.commit_index:leader_commit]
@@ -394,55 +400,55 @@ class RaftNode:
 
 	def process_ack(self,follower_id, term,acked_len, success):
 		# print()
-		logger.info("process ack=>,{follower_id, term,acked_len, success,self.acked_length[follower_id]}")
-		logger.info(f"process ack=>,{follower_id, term,acked_len, success,self.acked_length[follower_id]}")
+		# logger.info("process ack=>,{follower_id, term,acked_len, success,self.acked_length[follower_id]}")
+		# logger.info(f"process ack=>,{follower_id, term,acked_len, success,self.acked_length[follower_id]}")
 
 
 		if(success==True and acked_len>=self.acked_length[follower_id]):
 			self.sent_length[follower_id]=acked_len
 			self.acked_length[follower_id]=acked_len
-			logger.info("Success ack commiting,{len(self.log)}")
-			logger.info(f"Success ack commiting,{len(self.log)}")
+			# logger.info("Success ack commiting,{len(self.log)}")
+			# logger.info(f"Success ack commiting,{len(self.log)}")
 			if(len(self.log)>0):
 				self.commit_log_entries()
 		elif self.sent_length[follower_id]>0:
 			#trying with a lower index to get the follower in sync
 			self.sent_length[follower_id]-=1
-			logger.info(f"Unsuccess ack retrying with,{self.sent_length[follower_id]}")
-			logger.info(f"Unsuccess ack retrying with,{self.sent_length[follower_id]}")
+			# logger.info("Unsuccess ack retrying with,{self.sent_length[follower_id]}")
+			# logger.info(f"Unsuccess ack retrying with,{self.sent_length[follower_id]}")
 
 			#new message will be sent with the next heartbeat
 	
 
 	def commit_log_entries(self):
-		logger.info("commit log entries=>")
+		# logger.info("commit log entries=>")
 		max_ready=0
 		for i in range(len(self.log),0,-1):
 			#leader is always ready at the latest index
 			k=1
-			logger.info("check max_ready,{i,self.acked_length,self.peers}")
-			logger.info(f"check max_ready,{i,self.acked_length,self.peers}")
+			# logger.info("check max_ready,{i,self.acked_length,self.peers}")
+			# logger.info(f"check max_ready,{i,self.acked_length,self.peers}")
 			for follower_id in self.peers:
 				if self.acked_length[follower_id]>=i:
 					k+=1
 			if(k>=self.majority):
-				logger.info("got majority ack,{i,k}")
-				logger.info(f"got majority ack,{i,k}")
+				# logger.info("got majority ack,{i,k}")
+				# logger.info(f"got majority ack,{i,k}")
 				max_ready=i
 				break
-			logger.info("didnt get majority ack")
+			# logger.info("didnt get majority ack")
 
 		# logger.info(f"commit log entries<=,{max_ready,self.log,self.commit_index,self.term}")
 		# logger.info(f"commit log entries<=,{max_ready,self.log,self.commit_index,self.term}")
 		
 		if max_ready>0 and max_ready>self.commit_index and self.log[max_ready-1]['term']==self.term :
-			logger.info(f"Commit Log: Leader ID {self.node_id}:\n{self.log[self.commit_index:max_ready]}")
+			# logger.info(f"Commit Log: Leader ID {self.node_id}:\n{self.log[self.commit_index:max_ready]}")
 
 			logfolder = "logs"
 			if not os.path.exists(logfolder):
 				os.makedirs(logfolder)
 			filepath = os.path.join(logfolder, f"{self.node_id}.txt")
-			logger.info(f"filepath leader:{filepath}")
+			# logger.info(f"filepath leader:{filepath}")
 			# f=open(filepath, "a")
 			# f.close()
 			with open(filepath, "a") as fl:
@@ -452,6 +458,11 @@ class RaftNode:
 			
 			
 			self.commit_index=max_ready
+			url=f"http://localhost:{config['client_ack_port']}/"
+			client_commit_update={"commit_len":self.commit_index}
+			# logger.info(f"Sending commit ack to:{url} ->{client_commit_update}")
+			resp=requests.post(url,json=client_commit_update)
+			print(resp)
 			self.save_state()
 
 
@@ -459,10 +470,10 @@ class RaftNode:
 
 	def vote(self, message):
 		# You have a higher term
-		logger.info("Voting req in {self.node_id}->{message.term,message.candidate_id, message.last_log_index, message.last_log_term}")
-		logger.info(f"Voting req in {self.node_id}->{message.term,message.candidate_id, message.last_log_index, message.last_log_term}")
-		logger.info(f"Voting req in {self.node_id}->{self.term,self.node_id, self.last_log_index, self.last_log_term}")
-		logger.info(f"{self.node_id} voted for {self.voted_for}")
+		# logger.info("Voting req in {self.node_id}->{message.term,message.candidate_id, message.last_log_index, message.last_log_term}")
+		# logger.info(f"Voting req in {self.node_id}->{message.term,message.candidate_id, message.last_log_index, message.last_log_term}")
+		# logger.info(f"Voting req in {self.node_id}->{self.term,self.node_id, self.last_log_index, self.last_log_term}")
+		# logger.info(f"{self.node_id} voted for {self.voted_for}")
 		
 		if message.term < self.term:
 			reply = RequestVoteReply(self.node_id,self.term, False)
@@ -516,7 +527,7 @@ class RaftNode:
 		# not_picklable=['app','context','listen_socket','poller','timeout_thread','listen_thread']
 		# for key in not_picklable:
 		# 	del class_dict[key]
-		logger.info(f"saving state->{class_dict}")
+		# logger.info(f"saving state->{class_dict}")
 		with open(filepath, 'wb') as f:
 			pickle.dump(class_dict, f)
 

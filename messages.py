@@ -6,13 +6,15 @@ logger = logging.getLogger('raft_logger')
 config = parse_config()
 
 class AppendEntryArgs:
-    def __init__(self, term, leader_id, entries, prev_log_index, prev_log_term, leader_commit):
+    def __init__(self, term, leader_id, entries, prev_log_index, prev_log_term, leader_commit,sent_length,acked_len):
         self.term = term
         self.leader_id = leader_id
         self.entries = entries
         self.prev_log_index = prev_log_index
         self.prev_log_term = prev_log_term
         self.leader_commit = leader_commit
+        self.sent_length=sent_length
+        self.acked_length=acked_len
 
 class AppendEntryReply:
     def __init__(self,follower_id, term,acked_len, success):

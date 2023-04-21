@@ -6,9 +6,6 @@ ports = [int(i) for i in ports]
 # url = 'http://localhost:2000/submit'
 
 while True:
-    # key = input('Enter key (or "exit" to quit): ')
-    # if key == 'exit':
-    #     break
     command = input('Enter command: ')
     data = {'data': command}
     for port in ports:
@@ -17,5 +14,6 @@ while True:
             response = requests.post(url, data=data)
             break
         except:
-            print("======Trying next port available=======")
+            pass
+            # print("======Trying next port available=======")
     print(response.text)
