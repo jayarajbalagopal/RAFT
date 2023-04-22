@@ -7,7 +7,7 @@ ports = [int(i) for i in ports]
 
 while True:
     command = input('Enter command: ')
-    data = {'data': command}
+    data = {'data': command,'index':'0'}
     for port in ports:
         url = f'http://localhost:{port}/submit'
         try:
