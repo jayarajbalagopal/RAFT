@@ -75,7 +75,7 @@ class RaftNode:
 
 		# Node startup log
 		logger.info("Node {}, initialized as {}".format(self.node_id, self.state))
-		# logger.info(f"{self.__dict__}")
+		logger.info(f"{self.__dict__}")
 	def start(self):
 
 
@@ -120,8 +120,8 @@ class RaftNode:
 					url = f'http://localhost:{port}/submit'
 				except:
 					logger.info("Leader not available")
-				data_leader = {'data': data}
-				response = requests.post(url, data=data_leader)
+				# data_leader = {'data': data}
+				response = requests.post(url, data=command_recvd)
 			else:
 				logger.info("Leader not elected yet")
 		return 'Data received'
@@ -147,7 +147,8 @@ class RaftNode:
 				# Received a vote request
 				if isinstance(message, RequestVoteArgs):
 					peer_id = message.candidate_id
-					logger.info("Node {}, received vote request from {}".format(self.node_id, peer_id))
+					logger.info("Node {}, received vote request from {} ->\n {}".format(self.node_id, peer_id,message.__dict__))
+
 					reply = self.vote(message)
 					self.listen_socket.send_pyobj(reply)
 
@@ -180,14 +181,17 @@ class RaftNode:
 		if isinstance(message, RequestVoteReply):
 			logger.info("Node {}, received vote reply from{}".format(self.node_id,message.voter_id))
 			# Received a positive vote, increment vote count
-			# logger.info("VoteReply {self.state,message.vote_granted,message.term,self.term}")
-			# logger.info(f"VoteReply {self.state,message.vote_granted,message.term,self.term}")
+			logger.info("VoteReply {self.state,message.vote_granted,message.term,self.term}")
+			logger.info(f"VoteReply {self.state,message.vote_granted,message.term,self.term}")
 			if self.state=="CANDIDATE" and message.vote_granted and message.term==self.term:
 				self.votes_received += 1
 			# Received majority, covert to leader, reset election stats, start sending heartbeat to all followers.
 				if self.votes_received >= self.majority:
 					logger.info("Node {}, received majority, moving to LEADER".format(self.node_id))
 					self.state = "LEADER"
+					for peer in self.peers:
+						self.sent_length[peer]=len(self.log)
+					# self.sent_length[]=
 					self.reset_election_params()
 					self.start_heartbeat()
 			elif message.term > self.term:
@@ -470,35 +474,45 @@ class RaftNode:
 
 	def vote(self, message):
 		# You have a higher term
-		# logger.info("Voting req in {self.node_id}->{message.term,message.candidate_id, message.last_log_index, message.last_log_term}")
-		# logger.info(f"Voting req in {self.node_id}->{message.term,message.candidate_id, message.last_log_index, message.last_log_term}")
-		# logger.info(f"Voting req in {self.node_id}->{self.term,self.node_id, self.last_log_index, self.last_log_term}")
-		# logger.info(f"{self.node_id} voted for {self.voted_for}")
+		logger.info("Voting req in {self.node_id}->{message.term,message.candidate_id, message.last_log_index, message.last_log_term}")
+		logger.info(f"Voting req in {self.node_id}->{message.term,message.candidate_id, message.last_log_index, message.last_log_term}")
+		logger.info(f"Voting req in {self.node_id}->{self.term,self.node_id, self.last_log_index, self.last_log_term}")
+		logger.info(f"{self.node_id} voted for {self.voted_for}")
 		
-		if message.term < self.term:
-			reply = RequestVoteReply(self.node_id,self.term, False)
-			return reply
+		# if message.term < self.term:
+		# 	reply = RequestVoteReply(self.node_id,self.term, False)
+		# 	return reply
 
-		# Vote already granted
-		if self.voted_for != None and self.voted_for != message.candidate_id:
-			reply = RequestVoteReply(self.node_id,self.term, False)
-			return reply
+		# # Vote already granted
+		# if self.voted_for != None and self.voted_for != message.candidate_id:
+		# 	reply = RequestVoteReply(self.node_id,self.term, False)
+		# 	return reply
 
-		# Your logs are more upto date
-		if message.last_log_term < self.last_log_term:
-			reply = RequestVoteReply(self.node_id,self.term, False)
-			return reply
+		# # Your logs are more upto date
+		# if message.last_log_term < self.last_log_term:
+		# 	reply = RequestVoteReply(self.node_id,self.term, False)
+		# 	return reply
 
-		# Logs are same, therefore compare term
-		if message.last_log_term == self.last_log_term and message.last_log_index < self.last_log_index:
-			reply = RequestVoteReply(self.node_id,self.term, False)
-			return reply
+		# # Logs are same, therefore compare term
+		# if message.last_log_term == self.last_log_term and message.last_log_index < self.last_log_index:
+		# 	reply = RequestVoteReply(self.node_id,self.term, False)
+		# 	return reply
 
-		logger.info("Node {}, voted for {}".format(self.node_id, message.candidate_id))
+		log_length_ok=(message.last_log_term>self.last_log_term) or ((message.last_log_term==self.last_log_term) and (message.last_log_index >= self.last_log_index) )
+		log_term_ok=(message.term > self.term) or ( (message.term==self.term) and (self.voted_for==None or self.voted_for==message.candidate_id) )
+
 		# Vote for the requesting candidate
-		self.voted_for = message.candidate_id
-		self.term = message.term
-		reply = RequestVoteReply(self.node_id,self.term, True)
+		if log_length_ok and log_term_ok:
+			self.voted_for = message.candidate_id
+			self.term = message.term
+			reply = RequestVoteReply(self.node_id,self.term, True)
+			logger.info("Node {}, voted for {}".format(self.node_id, self.voted_for))
+		else:
+			reply = RequestVoteReply(self.node_id,self.term, False)
+			logger.info("Node {}, cant vote for {}".format(self.node_id, self.voted_for))
+
+
+
 		return reply 
 
 	def set_randomized_timeout(self):
@@ -520,7 +534,7 @@ class RaftNode:
 			os.makedirs(logfolder)
 		filepath = os.path.join(logfolder, f"{self.node_id}.state")
 		class_dict={}
-		saved_states=['term','log','commit_index','last_log_index','last_log_term','acked_length','sent_length']
+		saved_states=['term','log','commit_index','last_log_index','last_log_term']
 		for k,v in self.__dict__.items():
 			if k in saved_states:
 				class_dict[k]=v

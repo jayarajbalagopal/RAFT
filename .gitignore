@@ -7,4 +7,3 @@ t.py
 *.state
 *.txt
 runner.sh
-clean.sh
