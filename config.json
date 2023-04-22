@@ -1,3 +1,4 @@
+
 {
   "log_level" : "DEBUG",
   "log_file" : "raft_server.log",

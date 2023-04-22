@@ -189,9 +189,11 @@ class RaftNode:
 				if self.votes_received >= self.majority:
 					logger.info("Node {}, received majority, moving to LEADER".format(self.node_id))
 					self.state = "LEADER"
+					self.log=self.log[:self.commit_index]
 					for peer in self.peers:
 						self.sent_length[peer]=len(self.log)
-					# self.sent_length[]=
+						self.acked_length[peer]=0
+					self.sent_length[self.node_id]=len(self.log)
 					self.reset_election_params()
 					self.start_heartbeat()
 			elif message.term > self.term:
@@ -204,7 +206,7 @@ class RaftNode:
 		if isinstance(message, AppendEntryReply):
 			logger.info("Node {}, Append entry reply".format(self.node_id))
 			
-			logger.info(f"terms->{message.term, self.term}")
+			# logger.info(f"terms->{message.term, self.term}")
 
 			if message.term == self.term and self.state=="LEADER":
 				logging.info(f"Processing ack from {message.follower_id}")
@@ -300,8 +302,8 @@ class RaftNode:
 					prev_log_term=self.log[prev_log_index-1]["term"]
 				message = AppendEntryArgs(self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index,self.sent_length,self.acked_length)
 				logger.info(f"Sending append entry msg to {target_node_id}")
-				logger.info("{self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index}")
-				logger.info(f"sending append entry msg to {target_node_id} :{self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index}")
+				# logger.info("{self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index}")
+				# logger.info(f"sending append entry msg to {target_node_id} :{self.term, self.node_id, entries, prev_log_index, prev_log_term, self.commit_index}")
 			else :
 				#Empty append entry as heartbeat
 				message = AppendEntryArgs(self.term, self.node_id, [], 0, 0, self.commit_index,self.sent_length,self.acked_length)
@@ -319,9 +321,9 @@ class RaftNode:
 		# Reset timer, because leader is alive, append entry send only by leader.
 		self.set_randomized_timeout()
 		self.reset_election_params()
-		logger.info("Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
-		logger.info(f"Node id {self.node_id} ->Message Entries:{message.term,message.prev_log_index,message.leader_commit,message.entries}")
-		logger.info(f"{message.__dict__}")
+		# logger.info("Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
+		# logger.info(f"Node id {self.node_id} ->Message Entries:{message.term,message.prev_log_index,message.leader_commit,message.entries}")
+		# logger.info(f"{message.__dict__}")
 		# self.sent_length=[max(x1,x2) for x1,x2 in zip(self.sent_length,message.sent_length)]
 		# self.acked_length=[max(y1,y2) for y1,y2 in zip(self.acked_length,message.acked_length)]
 		if(message.term>=self.term):
@@ -341,14 +343,14 @@ class RaftNode:
 		else:
 			term_consistency=(message.prev_log_term==self.log[-1]["term"])
 		logOK=(index_consistency)and(term_consistency)
-		logger.info("message.term,self.term,logOK,len(self.log),message.prev_log_index")
-		logger.info(f"{message.term,self.term,logOK,len(self.log),message.prev_log_index}")
+		# logger.info("message.term,self.term,logOK,len(self.log),message.prev_log_index")
+		# logger.info(f"{message.term,self.term,logOK,len(self.log),message.prev_log_index}")
 
 
 		if(message.term==self.term and logOK):
 			# adding entry
-			logger.info("LogOK at {self.node_id} \n Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
-			logger.info(f"LogOK at {self.node_id} \n Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
+			# logger.info("LogOK at {self.node_id} \n Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
+			# logger.info(f"LogOK at {self.node_id} \n Message Entries:{message.prev_log_index,message.leader_commit,message.entries}")
 			self.append_entry(message.prev_log_index,message.leader_commit,message.entries)
 
 			acked_len=message.prev_log_index+len(message.entries)
@@ -390,7 +392,7 @@ class RaftNode:
 			if not os.path.exists(logfolder):
 				os.makedirs(logfolder)
 			filepath = os.path.join(logfolder, f"{self.node_id}.txt")
-			logger.info(f"filepath:{filepath}")
+			# logger.info(f"filepath:{filepath}")
 			
 			with open(filepath, "a") as fl:
 				current_commit = self.log[self.commit_index:leader_commit]
@@ -404,8 +406,8 @@ class RaftNode:
 
 	def process_ack(self,follower_id, term,acked_len, success):
 		# print()
-		logger.info("process ack=>,{follower_id, term,acked_len, success,self.acked_length[follower_id]}")
-		logger.info(f"process ack=>,{follower_id, term,acked_len, success,self.acked_length[follower_id]}")
+		# logger.info("process ack=>,{follower_id, term,acked_len, success,self.acked_length[follower_id]}")
+		# logger.info(f"process ack=>,{follower_id, term,acked_len, success,self.acked_length[follower_id]}")
 
 
 		if(success==True and acked_len>=self.acked_length[follower_id]):
@@ -425,13 +427,13 @@ class RaftNode:
 	
 
 	def commit_log_entries(self):
-		logger.info("commit log entries=>")
+		# logger.info("commit log entries=>")
 		max_ready=0
 		for i in range(len(self.log),0,-1):
 			#leader is always ready at the latest index
 			k=1
-			logger.info("check max_ready,{i,self.acked_length,self.peers}")
-			logger.info(f"check max_ready,{i,self.acked_length,self.peers}")
+			# logger.info("check max_ready,{i,self.acked_length,self.peers}")
+			# logger.info(f"check max_ready,{i,self.acked_length,self.peers}")
 			for follower_id in self.peers:
 				if self.acked_length[follower_id]>=i:
 					k+=1
@@ -442,7 +444,7 @@ class RaftNode:
 				break
 			logger.info("didnt get majority ack")
 
-		logger.info(f"commit log entries<=,{max_ready,self.log,self.commit_index,self.term}")
+		logger.info("commit log entries<=,{max_ready,self.log,self.commit_index,self.term}")
 		logger.info(f"commit log entries<=,{max_ready,self.log,self.commit_index,self.term}")
 		
 		if max_ready>0 and max_ready>self.commit_index and self.log[max_ready-1]['term']==self.term :
@@ -541,7 +543,7 @@ class RaftNode:
 		# not_picklable=['app','context','listen_socket','poller','timeout_thread','listen_thread']
 		# for key in not_picklable:
 		# 	del class_dict[key]
-		logger.info(f"saving state->{class_dict}")
+		# logger.info(f"saving state->{class_dict}")
 		with open(filepath, 'wb') as f:
 			pickle.dump(class_dict, f)
 
